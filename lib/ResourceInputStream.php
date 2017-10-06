@@ -25,6 +25,9 @@ final class ResourceInputStream implements InputStream {
     /** @var bool */
     private $readable = true;
 
+    /** @var int */
+    private $chunkSize = self::DEFAULT_CHUNK_SIZE;
+
     /**
      * @param resource $stream Stream resource.
      * @param int $chunkSize Chunk size per `fread()` operation.
@@ -44,6 +47,7 @@ final class ResourceInputStream implements InputStream {
         \stream_set_read_buffer($stream, 0);
 
         $this->resource = $stream;
+        $this->chunkSize = $chunkSize;
 
         $deferred = &$this->deferred;
         $readable = &$this->readable;
@@ -53,6 +57,7 @@ final class ResourceInputStream implements InputStream {
             $data = @\fread($stream, $chunkSize);
 
             \assert($data !== false, "Trying to read from a previously fclose()'d resource. Do NOT manually fclose() resources the loop still has a reference to.");
+
             if ($data === '' && \feof($stream)) {
                 $readable = false;
                 Loop::cancel($watcher);
@@ -81,10 +86,27 @@ final class ResourceInputStream implements InputStream {
             return new Success; // Resolve with null on closed stream.
         }
 
-        $this->deferred = new Deferred;
-        Loop::enable($this->watcher);
+        // Attempt a direct read, because the read buffer might be filled due to stream wrappers such as OpenSSL.
 
-        return $this->deferred->promise();
+        // Error reporting suppressed since fread() produces a warning if the stream has been shutdown
+        $data = @\fread($this->resource, $this->chunkSize);
+
+        \assert($data !== false, "Trying to read from a previously fclose()'d resource. Do NOT manually fclose() resources the loop still has a reference to.");
+
+        if ($data === '') {
+            if (\feof($this->resource)) {
+                $this->readable = false;
+                Loop::cancel($this->watcher);
+                $data = null; // Stream closed, resolve read with null.
+            } else {
+                $this->deferred = new Deferred;
+                Loop::enable($this->watcher);
+
+                return $this->deferred->promise();
+            }
+        }
+
+        return new Success($data);
     }
 
     /**
